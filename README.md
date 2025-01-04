@@ -8,10 +8,11 @@ This project is a comprehensive medical assistance robot developed using the Rob
 - **emergencyNode/**: Monitors patient health metrics to detect emergencies and initiate alerts.
 - **motion/**: Controls the robot's movement, enabling navigation within healthcare environments.
 - **smartMedicalWatch/**: Interfaces with wearable devices to collect real-time patient health data.
-- **static/**: Contains configuration files and resources essential for the robot's operation.
 - **patients.db**: A database file that stores patient information securely.
 - **ros cheat notes.txt**: A reference file with ROS commands and notes for development purposes.
 - **server.py**: Implements the server responsible for managing patient data and coordinating between nodes.
+- **static/**: Contains server file mainly the html frontend code.
+
 
 ## Key Features
 
