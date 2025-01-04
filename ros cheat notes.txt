@@ -1,0 +1,28 @@
+I)ros workspace initialization:
+1-sourceing script that init ros ws
+source /opt/ros/kinetic/setup.bash
+2-init ros commands to use then in terminal
+.bashrc
+NOTE: add source /opt/ros/kinetic/setup.bash to .bashrc
+3- crate ros workspace with src dir in it
+mkdir -p ~/ros_ws_name/src
+NOTE the -p flag crate folder with sub folder init which is in our case src folder
+4-compile catkin_make
+goto main workspace and type catkin_make
+this will make 2 important dirctories devel and build
+5-source setup.bash in devel folder
+source ~/ros_ws_name/devel/setup.bash
+and add this to bashrc same
+
+*****************************************************
+*****************************************************
+II) create package
+1-goto src directory and type:
+catkin_create_pkg pkg_name dependencies
+in which:pkg_name is any name you want but lowercase
+and the dependencies is what you require in the pkg for example rospy roscpp std_msg rosserial
+2-goto workspace dir by cd ../
+and type catkin_make to compile
+
+*****************************************************
+*****************************************************
