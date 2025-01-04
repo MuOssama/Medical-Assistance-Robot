@@ -1,5 +1,3 @@
-# Medical-Assistance-Robot
-This is complete medical assistance robot runs on ROS which contains smart medical watch node, sever node carry patient data , motion node, dispensing medicine (syrup and tablets) and call for emergency if patient is in danger  
 # Medical Assistance Robot
 
 This project is a comprehensive medical assistance robot developed using the Robot Operating System (ROS). It integrates various functionalities to support patient care, including health monitoring, data management, mobility, medication dispensing, and emergency response.
