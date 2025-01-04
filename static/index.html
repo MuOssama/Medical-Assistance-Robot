@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Patient Health Management</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+</head>
+<body class="bg-gray-100">
+    <div class="container mx-auto p-6">
+        <h1 class="text-3xl font-bold text-center mb-6">Patient Health Management</h1>
+
+        <!-- Patient Records Table -->
+        <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+            <h2 class="text-xl font-semibold mb-4">Current Patient States</h2>
+            <table class="w-full table-auto border-collapse border border-gray-200">
+                <thead>
+                    <tr class="bg-gray-200">
+                        <th class="border border-gray-300 px-4 py-2">Patient ID</th>
+                        <th class="border border-gray-300 px-4 py-2">Order</th>
+                        <th class="border border-gray-300 px-4 py-2">Heart Rate (BPM)</th>
+                        <th class="border border-gray-300 px-4 py-2">SpO2 (%)</th>
+                        <th class="border border-gray-300 px-4 py-2">Temperature (°C)</th>
+                        <th class="border border-gray-300 px-4 py-2">Glucose Level (mg/dL)</th>
+                        <th class="border border-gray-300 px-4 py-2">Medications</th>
+                        <th class="border border-gray-300 px-4 py-2">Schedule</th>
+                        <th class="border border-gray-300 px-4 py-2">Health State</th>
+                    </tr>
+                </thead>
+                <tbody id="patientTableBody">
+                    <!-- Patient rows will be dynamically inserted here -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Update Patient Form -->
+        <div class="bg-white rounded-lg shadow-md p-6">
+            <h2 class="text-xl font-semibold mb-4">Update Patient Record</h2>
+            <form id="patientForm" class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block mb-2">Patient ID</label>
+                    <select name="patient_id" required class="w-full p-2 border rounded">
+                        <option value="1">Patient 1</option>
+                        <option value="2">Patient 2</option>
+                        <option value="3">Patient 3</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block mb-2">Heart Rate (BPM)</label>
+                    <input type="number" name="heart_rate" required class="w-full p-2 border rounded">
+                </div>
+                <div>
+                    <label class="block mb-2">SpO2 (%)</label>
+                    <input type="number" name="spo2" required class="w-full p-2 border rounded">
+                </div>
+                <div>
+                    <label class="block mb-2">Temperature (°C)</label>
+                    <input type="number" name="temperature" step="0.1" required class="w-full p-2 border rounded">
+                </div>
+                <div>
+                    <label class="block mb-2">Glucose Level (mg/dL)</label>
+                    <input type="number" name="glucose_level" required class="w-full p-2 border rounded">
+                </div>
+                <div>
+                    <label class="block mb-2">Medications (comma-separated)</label>
+                    <input type="text" name="medicals" required class="w-full p-2 border rounded">
+                </div>
+                <div>
+                    <label class="block mb-2">Schedule ID</label>
+                    <input type="number" name="medical_schedule" required class="w-full p-2 border rounded">
+                </div>
+                <button type="submit" class="col-span-2 bg-blue-500 text-white py-2 px-4 rounded hover:bg-blue-600">
+                    Update Record
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        async function loadPatients() {
+            try {
+                const response = await axios.get('/api/patients');
+                const patients = response.data;
+                const tableBody = document.getElementById('patientTableBody');
+                tableBody.innerHTML = '';
+
+                patients.forEach(patient => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.id}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.patient_order}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.heart_rate || 'N/A'}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.spo2 || 'N/A'}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.temperature || 'N/A'}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.glucose_level || 'N/A'}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.medicals.join(', ') || 'N/A'}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.medical_schedule || 'N/A'}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.health_state}</td>
+                    `;
+                    tableBody.appendChild(row);
+                });
+            } catch (error) {
+                console.error('Error loading patients:', error);
+            }
+        }
+
+        function initializeForm() {
+            document.getElementById('patientForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+                const patientId = formData.get('patient_id');
+
+                try {
+                    await axios.post(`/api/patients/${patientId}`, {
+                        heart_rate: formData.get('heart_rate'),
+                        spo2: formData.get('spo2'),
+                        temperature: formData.get('temperature'),
+                        glucose_level: formData.get('glucose_level'),
+                        medicals: formData.get('medicals').split(',').map(m => m.trim()),
+                        medical_schedule: formData.get('medical_schedule')
+                    });
+
+                    e.target.reset();
+                    loadPatients();
+                    alert(`Patient ${patientId} record updated successfully`);
+                } catch (error) {
+                    console.error('Error updating patient:', error);
+                    alert('Failed to update patient record');
+                }
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            loadPatients();
+            initializeForm();
+        });
+    </script>
+</body>
+</html>
