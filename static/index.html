@@ -47,6 +47,10 @@
                     </select>
                 </div>
                 <div>
+                    <label class="block mb-2">Patient Order</label>
+                    <input type="number" name="patient_order" required class="w-full p-2 border rounded">
+                </div>
+                <div>
                     <label class="block mb-2">Heart Rate (BPM)</label>
                     <input type="number" name="heart_rate" required class="w-full p-2 border rounded">
                 </div>
@@ -118,7 +122,8 @@
                         temperature: formData.get('temperature'),
                         glucose_level: formData.get('glucose_level'),
                         medicals: formData.get('medicals').split(',').map(m => m.trim()),
-                        medical_schedule: formData.get('medical_schedule')
+                        medical_schedule: formData.get('medical_schedule'),
+                        patient_order: formData.get('patient_order') // Added this line
                     });
 
                     e.target.reset();
