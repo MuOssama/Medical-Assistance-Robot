@@ -1,0 +1,28 @@
+<launch>
+    <!-- Start the server node -->
+    <node name="server_node" pkg="medical_robot" type="server.py" output="screen" />
+
+    <!-- Start the motion node -->
+    <node name="motion_node" pkg="rosserial_python" type="serial_node.py" output="screen">
+        <param name="port" value="/dev/ttyACM0" />
+        <param name="baud" value="57600" />
+    </node>
+
+    <!-- Start the dispenser node -->
+    <node name="dispenser_node" pkg="rosserial_python" type="serial_node.py" output="screen">
+        <param name="port" value="/dev/ttyACM1" />
+        <param name="baud" value="57600" />
+    </node>
+
+    <!-- Start the emergency node -->
+    <node name="emergency_node" pkg="medical_robot" type="emergency_node.py" output="screen" />
+
+    <!-- Start the smart medical watch node -->
+    <node name="smart_medical_watch_node" pkg="medical_robot" type="smart_watch_node.py" output="screen" />
+
+    <!-- Parameters for the database -->
+    <param name="database_path" value="$(find medical_robot)/patients.db" />
+
+    <!-- Set environment variables if needed -->
+    <env name="ROSCONSOLE_FORMAT" value="[${node}] [${severity}] [${time}] ${message}" />
+</launch>
