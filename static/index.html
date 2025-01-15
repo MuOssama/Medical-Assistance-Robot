@@ -70,7 +70,7 @@
                 </div>
                 <div>
                     <label class="block mb-2">Medications (comma-separated)</label>
-                    <input type="text" name="medicals" required class="w-full p-2 border rounded">
+                    <input type="text" name="medicals" required class="w-full p-2 border rounded" placeholder="0,0,0,0,0">
                 </div>
                 <div>
                     <label class="block mb-2">Schedule ID</label>
@@ -91,6 +91,7 @@
     </div>
 
     <script>
+        // Load patients data every 5 seconds
         async function loadPatients() {
             try {
                 const response = await axios.get('/api/patients');
@@ -99,17 +100,20 @@
                 tableBody.innerHTML = '';
 
                 patients.forEach(patient => {
+                    const healthStateClass = patient.health_state === 'in danger' ? 'bg-red-100' : 
+                                          patient.health_state === 'ok' ? 'bg-green-100' : 'bg-yellow-100';
+                    
                     const row = document.createElement('tr');
                     row.innerHTML = `
                         <td class="border border-gray-300 px-4 py-2 text-center">${patient.id}</td>
                         <td class="border border-gray-300 px-4 py-2 text-center">${patient.patient_order}</td>
-                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.heart_rate || 'N/A'}</td>
-                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.spo2 || 'N/A'}</td>
-                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.temperature || 'N/A'}</td>
-                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.glucose_level || 'N/A'}</td>
-                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.medicals.join(', ') || 'N/A'}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center ${healthStateClass}">${patient.heart_rate || 'N/A'}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center ${healthStateClass}">${patient.spo2 || 'N/A'}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center ${healthStateClass}">${patient.temperature || 'N/A'}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center ${healthStateClass}">${patient.glucose_level || 'N/A'}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center">${Array.isArray(patient.medicals) ? patient.medicals.join(', ') : 'N/A'}</td>
                         <td class="border border-gray-300 px-4 py-2 text-center">${patient.medical_schedule || 'N/A'}</td>
-                        <td class="border border-gray-300 px-4 py-2 text-center">${patient.health_state}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center ${healthStateClass}">${patient.health_state}</td>
                         <td class="border border-gray-300 px-4 py-2 text-center ${patient.is_dispensing ? 'bg-yellow-100' : 'bg-green-100'}">
                             ${patient.is_dispensing ? 'Dispensing...' : 'Ready'}
                         </td>
@@ -145,8 +149,40 @@
             }
         }
 
-        function initializeForm() {
-            document.getElementById('patientForm').addEventListener('submit', async (e) => {
-                e.preventDefault();
-                const formData = new FormData(e.target);
-                const patientId = form
+        // Initialize form submission handler
+        document.getElementById('patientForm').addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+            const patientId = formData.get('patient_id');
+            
+            // Convert form data to JSON object
+            const data = {
+                heart_rate: parseFloat(formData.get('heart_rate')),
+                spo2: parseFloat(formData.get('spo2')),
+                temperature: parseFloat(formData.get('temperature')),
+                glucose_level: parseFloat(formData.get('glucose_level')),
+                medicals: formData.get('medicals').split(',').map(num => parseInt(num.trim())),
+                medical_schedule: parseInt(formData.get('medical_schedule')),
+                patient_order: parseInt(formData.get('patient_order')),
+                is_dispensing: formData.get('is_dispensing') === 'true'
+            };
+
+            try {
+                await axios.post(`/api/patients/${patientId}`, data);
+                event.target.reset();
+                loadPatients();
+                alert('Patient record updated successfully');
+            } catch (error) {
+                console.error('Error updating patient:', error);
+                alert('Failed to update patient record');
+            }
+        });
+
+        // Initial load
+        loadPatients();
+
+        // Set up automatic refresh every 5 seconds
+        setInterval(loadPatients, 5000);
+    </script>
+</body>
+</html>
