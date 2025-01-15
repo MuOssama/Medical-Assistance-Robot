@@ -1,211 +1,175 @@
-//motion node
 #include <WiFi.h>
-#include <WiFiClient.h>
+#include <HTTPClient.h>
 #include <BluetoothSerial.h>
+#include <ArduinoJson.h>
 
-// Create BluetoothSerial instance
+// Config
+const char* ssid = "your_ssid";
+const char* password = "your_password";
+const char* serverUrl = "http://your_server_ip:5000";
+
+// Pins
+const byte MOTOR_PINS[] = {25, 26, 27, 32, 33, 14}; // STEP, DIR, EN for L & R
+const byte IR_PINS[] = {36, 39, 34, 35, 15, 4, 16, 17, 18, 19};
+
+// State machine
+byte currentState = 0;  // 0:IDLE, 1:FINDING, 2:FOLLOWING, 3:AT_PATIENT, 4:WAITING
+byte currentCommand = 0; // 0:STOP, 1:FORWARD, 2:LINE_FOLLOW
+byte currentPatient = 0;
+const byte targetPatient = 3;
+const byte baseSpeed = 50;
+
 BluetoothSerial SerialBT;
 
-// Motor pins (TB6600)
-#define MOTOR_L_STEP 25
-#define MOTOR_L_DIR  26
-#define MOTOR_L_EN   27
-#define MOTOR_R_STEP 32
-#define MOTOR_R_DIR  33
-#define MOTOR_R_EN   14
+void setMotors(bool enable) {
+    digitalWrite(MOTOR_PINS[2], !enable);  // L_EN
+    digitalWrite(MOTOR_PINS[5], !enable);  // R_EN
+}
 
-// IR Sensors (10 sensors)
-const int IR_PINS[10] = {36, 39, 34, 35, 15, 4, 16, 17, 18, 19};
+bool updateServer(byte id, bool state) {
+    if(WiFi.status() != WL_CONNECTED) return false;
+    
+    HTTPClient http;
+    String url = String(serverUrl) + "/api/patients/" + String(id);
+    
+    StaticJsonDocument<64> doc;
+    doc["dispensing_state"] = state;
+    
+    String payload;
+    serializeJson(doc, payload);
+    
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    int code = http.PATCH(payload);
+    http.end();
+    
+    return (code == 200);
+}
 
-// States
-enum RobotState {IDLE, FINDING_LINE, FOLLOWING_LINE, AT_PATIENT, WAITING};
-enum Command {FORWARD, BACKWARD, LEFT, RIGHT, STOP, FOLLOW_LINE, EMERGENCY};
+// Simplified line detection - returns true if robot is on a line intersection
+bool checkLine() {
+    byte count = 0;
+    for(byte i = 0; i < 10; i++) {
+        if(digitalRead(IR_PINS[i])) count++;
+    }
+    return count >= 8;
+}
 
-// Global variables
-RobotState currentState = IDLE;
-Command currentCommand = STOP;
-int currentPatient = 0;
-int targetPatient = 3;  // Maximum patients
-int baseSpeed = 50;
+// Simplified line position calculation
+int8_t getLinePosition() {
+    byte leftSum = 0, rightSum = 0;
+    
+    // Simple left/right balance detection
+    for(byte i = 0; i < 5; i++) {
+        if(digitalRead(IR_PINS[i])) leftSum++;
+        if(digitalRead(IR_PINS[i + 5])) rightSum++;
+    }
+    
+    if(leftSum > rightSum) return -1;
+    if(rightSum > leftSum) return 1;
+    return 0;
+}
 
-// PID constants and variables
-float Kp = 25, Ki = 0, Kd = 15;
-float error = 0, P = 0, I = 0, D = 0;
-float previousError = 0;
+void move(int16_t left, int16_t right) {
+    left = constrain(left, -100, 100);
+    right = constrain(right, -100, 100);
+    
+    digitalWrite(MOTOR_PINS[1], left > 0);   // L_DIR
+    digitalWrite(MOTOR_PINS[4], right > 0);  // R_DIR
+    
+    byte steps = abs(max(left, right));
+    while(steps--) {
+        if(abs(left)) digitalWrite(MOTOR_PINS[0], HIGH);   // L_STEP
+        if(abs(right)) digitalWrite(MOTOR_PINS[3], HIGH);  // R_STEP
+        delayMicroseconds(500);
+        digitalWrite(MOTOR_PINS[0], LOW);
+        digitalWrite(MOTOR_PINS[3], LOW);
+        delayMicroseconds(500);
+    }
+}
 
-// Function declarations
-void enableMotors();
-void disableMotors();
-void moveRobot(int leftSpeed, int rightSpeed);
-bool checkAllSensors();
-float calculatePID();
-void handleMotion();
-void processCommand(String cmd);
+void handleCommand(const String& cmd) {
+    if(cmd == "AUX1" && !currentState) {
+        currentState = 1;
+        currentCommand = 2;
+        setMotors(true);
+        currentPatient = 0;
+    }
+    else if(cmd == "STOP" || cmd == "Emergency") {
+        currentCommand = currentState = 0;
+        setMotors(false);
+    }
+    else if(!currentState) {
+        setMotors(true);
+        if(cmd == "Forward") move(baseSpeed, baseSpeed);
+        else if(cmd == "Backward") move(-baseSpeed, -baseSpeed);
+        else if(cmd == "Left") move(-baseSpeed/2, baseSpeed/2);
+        else if(cmd == "Right") move(baseSpeed/2, -baseSpeed/2);
+        else if(cmd == "Stop") move(0, 0);
+    }
+}
+
+void followLine() {
+    if(currentCommand != 2) return;
+    
+    switch(currentState) {
+        case 1:  // FINDING
+            if(checkLine()) {
+                currentState = 2;
+            } else {
+                move(baseSpeed/2, -baseSpeed/2);  // Rotate to find line
+            }
+            break;
+
+        case 2:  // FOLLOWING
+            if(checkLine()) {
+                currentState = 3;
+                currentPatient++;
+                move(0, 0);
+                updateServer(currentPatient, true);
+            } else {
+                // Simple line following using left/right balance
+                int8_t pos = getLinePosition();
+                if(pos < 0) {
+                    move(baseSpeed/2, baseSpeed);      // Turn left
+                } else if(pos > 0) {
+                    move(baseSpeed, baseSpeed/2);      // Turn right
+                } else {
+                    move(baseSpeed, baseSpeed);        // Go straight
+                }
+            }
+            break;
+
+        case 3:  // AT_PATIENT
+            if(currentPatient < targetPatient) {
+                delay(5000);
+                currentState = 2;
+            } else {
+                currentState = 4;
+                setMotors(false);
+            }
+            break;
+    }
+}
 
 void setup() {
-  // Motor setup
-  for(int i = 0; i < 6; i++) {
-    pinMode(MOTOR_L_STEP + i, OUTPUT);
-  }
-
-  // IR setup
-  for(int i = 0; i < 10; i++) {
-    pinMode(IR_PINS[i], INPUT);
-  }
-
-  SerialBT.begin("MedicalRobot");
-}
-
-void processCommand(String cmd) {
-  if(cmd == "AUX1" && currentState == IDLE) {
-    currentState = FINDING_LINE;
-    currentCommand = FOLLOW_LINE;
-    enableMotors();
-  }
-  else if(cmd == "Accelerate") {
-    currentCommand = FORWARD;
-    currentState = IDLE;
-  }
-  else if(cmd == "Brake") {
-    currentCommand = STOP;
-    currentState = IDLE;
-  }
-  else if(cmd == "Steer left") {
-    currentCommand = LEFT;
-    currentState = IDLE;
-  }
-  else if(cmd == "Steer right") {
-    currentCommand = RIGHT;
-    currentState = IDLE;
-  }
-  else if(cmd == "Emergency") {
-    currentCommand = EMERGENCY;
-    currentState = IDLE;
-    disableMotors();
-  }
-}
-
-void enableMotors() {
-  digitalWrite(MOTOR_L_EN, LOW);
-  digitalWrite(MOTOR_R_EN, LOW);
-}
-
-void disableMotors() {
-  digitalWrite(MOTOR_L_EN, HIGH);
-  digitalWrite(MOTOR_R_EN, HIGH);
-}
-
-bool checkAllSensors() {
-  int blackCount = 0;
-  for(int i = 0; i < 10; i++) {
-    if(digitalRead(IR_PINS[i])) blackCount++;
-  }
-  return blackCount >= 8;  // Allow for some sensor error
-}
-
-float calculatePID() {
-  int position = 0;
-  int sensorCount = 0;
-
-  for(int i = 0; i < 10; i++) {
-    if(digitalRead(IR_PINS[i])) {
-      position += i * 1000;
-      sensorCount++;
+    WiFi.begin(ssid, password);
+    
+    for(byte i = 0; i < 6; i++) {
+        pinMode(MOTOR_PINS[i], OUTPUT);
     }
-  }
-
-  if(sensorCount == 0) return previousError;
-
-  position = position / sensorCount;
-  error = position - 4500;  // Center point (9000/2)
-
-  P = error;
-  I += error;
-  D = error - previousError;
-  previousError = error;
-
-  return (Kp * P) + (Ki * I) + (Kd * D);
-}
-
-void moveRobot(int leftSpeed, int rightSpeed) {
-  digitalWrite(MOTOR_L_DIR, leftSpeed > 0);
-  digitalWrite(MOTOR_R_DIR, rightSpeed > 0);
-
-  for(int i = 0; i < abs(max(leftSpeed, rightSpeed))/10; i++) {
-    digitalWrite(MOTOR_L_STEP, HIGH);
-    digitalWrite(MOTOR_R_STEP, HIGH);
-    delayMicroseconds(500);
-    digitalWrite(MOTOR_L_STEP, LOW);
-    digitalWrite(MOTOR_R_STEP, LOW);
-    delayMicroseconds(500);
-  }
-}
-
-void handleMotion() {
-  if(currentCommand == FOLLOW_LINE) {
-    switch(currentState) {
-      case FINDING_LINE:
-        if(checkAllSensors()) {
-          currentState = FOLLOWING_LINE;
-        } else {
-          moveRobot(baseSpeed, -baseSpeed);  // Rotate to find line
-        }
-        break;
-
-      case FOLLOWING_LINE:
-        if(checkAllSensors()) {
-          currentState = AT_PATIENT;
-          currentPatient++;
-          moveRobot(0, 0);
-        } else {
-          float pidValue = calculatePID();
-          int leftSpeed = baseSpeed - pidValue;
-          int rightSpeed = baseSpeed + pidValue;
-          moveRobot(leftSpeed, rightSpeed);
-        }
-        break;
-
-      case AT_PATIENT:
-        if(currentPatient < targetPatient) {
-          currentState = FOLLOWING_LINE;
-        } else {
-          currentState = WAITING;
-        }
-        break;
-
-      case WAITING:
-        moveRobot(0, 0);
-        break;
+    for(byte i = 0; i < 10; i++) {
+        pinMode(IR_PINS[i], INPUT);
     }
-  } else {
-    // Manual control
-    switch(currentCommand) {
-      case FORWARD:
-        moveRobot(baseSpeed, baseSpeed);
-        break;
-      case BACKWARD:
-        moveRobot(-baseSpeed, -baseSpeed);
-        break;
-      case LEFT:
-        moveRobot(-baseSpeed/2, baseSpeed/2);
-        break;
-      case RIGHT:
-        moveRobot(baseSpeed/2, -baseSpeed/2);
-        break;
-      case STOP:
-      case EMERGENCY:
-        moveRobot(0, 0);
-        break;
-    }
-  }
+    
+    SerialBT.begin("MedRobot");
+    setMotors(false);
 }
 
 void loop() {
-  if(SerialBT.available()) {
-    String command = SerialBT.readStringUntil('\n');
-    processCommand(command);
-  }
-
-  handleMotion();
-  delay(10);
+    if(SerialBT.available()) {
+        handleCommand(SerialBT.readStringUntil('\n'));
+    }
+    followLine();
+    delay(10);
 }

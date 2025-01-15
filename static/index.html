@@ -26,6 +26,8 @@
                         <th class="border border-gray-300 px-4 py-2">Medications</th>
                         <th class="border border-gray-300 px-4 py-2">Schedule</th>
                         <th class="border border-gray-300 px-4 py-2">Health State</th>
+                        <th class="border border-gray-300 px-4 py-2">Dispensing State</th>
+                        <th class="border border-gray-300 px-4 py-2">Actions</th>
                     </tr>
                 </thead>
                 <tbody id="patientTableBody">
@@ -74,6 +76,13 @@
                     <label class="block mb-2">Schedule ID</label>
                     <input type="number" name="medical_schedule" required class="w-full p-2 border rounded">
                 </div>
+                <div>
+                    <label class="block mb-2">Dispensing State</label>
+                    <select name="is_dispensing" required class="w-full p-2 border rounded">
+                        <option value="false">Ready</option>
+                        <option value="true">Dispensing</option>
+                    </select>
+                </div>
                 <button type="submit" class="col-span-2 bg-blue-500 text-white py-2 px-4 rounded hover:bg-blue-600">
                     Update Record
                 </button>
@@ -101,6 +110,15 @@
                         <td class="border border-gray-300 px-4 py-2 text-center">${patient.medicals.join(', ') || 'N/A'}</td>
                         <td class="border border-gray-300 px-4 py-2 text-center">${patient.medical_schedule || 'N/A'}</td>
                         <td class="border border-gray-300 px-4 py-2 text-center">${patient.health_state}</td>
+                        <td class="border border-gray-300 px-4 py-2 text-center ${patient.is_dispensing ? 'bg-yellow-100' : 'bg-green-100'}">
+                            ${patient.is_dispensing ? 'Dispensing...' : 'Ready'}
+                        </td>
+                        <td class="border border-gray-300 px-4 py-2 text-center">
+                            <button onclick="toggleDispensing(${patient.id}, ${!patient.is_dispensing})"
+                                    class="px-3 py-1 rounded ${patient.is_dispensing ? 'bg-red-500' : 'bg-blue-500'} text-white">
+                                ${patient.is_dispensing ? 'Stop' : 'Start'} Dispensing
+                            </button>
+                        </td>
                     `;
                     tableBody.appendChild(row);
                 });
@@ -109,37 +127,26 @@
             }
         }
 
+        async function toggleDispensing(patientId, newState) {
+            try {
+                const response = await axios.get('/api/patients');
+                const patient = response.data.find(p => p.id === patientId);
+                if (!patient) return;
+
+                await axios.post(`/api/patients/${patientId}`, {
+                    ...patient,
+                    is_dispensing: newState
+                });
+
+                loadPatients();
+            } catch (error) {
+                console.error('Error toggling dispensing state:', error);
+                alert('Failed to update dispensing state');
+            }
+        }
+
         function initializeForm() {
             document.getElementById('patientForm').addEventListener('submit', async (e) => {
                 e.preventDefault();
                 const formData = new FormData(e.target);
-                const patientId = formData.get('patient_id');
-
-                try {
-                    await axios.post(`/api/patients/${patientId}`, {
-                        heart_rate: formData.get('heart_rate'),
-                        spo2: formData.get('spo2'),
-                        temperature: formData.get('temperature'),
-                        glucose_level: formData.get('glucose_level'),
-                        medicals: formData.get('medicals').split(',').map(m => m.trim()),
-                        medical_schedule: formData.get('medical_schedule'),
-                        patient_order: formData.get('patient_order') // Added this line
-                    });
-
-                    e.target.reset();
-                    loadPatients();
-                    alert(`Patient ${patientId} record updated successfully`);
-                } catch (error) {
-                    console.error('Error updating patient:', error);
-                    alert('Failed to update patient record');
-                }
-            });
-        }
-
-        document.addEventListener('DOMContentLoaded', () => {
-            loadPatients();
-            initializeForm();
-        });
-    </script>
-</body>
-</html>
+                const patientId = form

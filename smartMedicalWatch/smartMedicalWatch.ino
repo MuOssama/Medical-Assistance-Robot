@@ -18,9 +18,12 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define BUZZER_PIN D8
 
 // Network configuration
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
-const char* serverUrl = "http://your_server:5000/api/patients/1";
+const char* ssid = "Voda";
+const char* password = "JoMahgoub74";
+const char* serverUrl = "http://192.168.1.7:5000/api/patients/1";
+
+// Create WiFiClient object
+WiFiClient wifiClient;
 
 // Timing constants
 #define REPORTING_PERIOD_MS 3000
@@ -46,17 +49,20 @@ float lastValidTemp = 0;
 float lastValidGlucose = 0;
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);  // Updated to faster baud rate
   pinMode(BUZZER_PIN, OUTPUT);
   
   // Initialize WiFi
+  WiFi.mode(WIFI_STA);  // Added explicit WiFi mode
   WiFi.begin(ssid, password);
+  
   Serial.print("Connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
   Serial.println("\nWiFi connected");
+  Serial.printf("IP address: %s\n", WiFi.localIP().toString().c_str());
 
   // Initialize OLED display
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
@@ -117,12 +123,13 @@ void updateServer(float heartRate, float spO2, float temperature, float glucose)
   }
 
   HTTPClient http;
-  http.begin(serverUrl);
+  // Use the new begin method with WiFiClient
+  http.begin(wifiClient, serverUrl);
   http.addHeader("Content-Type", "application/json");
 
+  // Use ArduinoJson v6 syntax
   StaticJsonDocument<300> doc;
   
-  // Add all required fields for the server
   doc["heart_rate"] = heartRate;
   doc["spo2"] = spO2;
   doc["temperature"] = temperature;
@@ -130,7 +137,6 @@ void updateServer(float heartRate, float spO2, float temperature, float glucose)
   doc["medical_schedule"] = 1;
   doc["patient_order"] = 1;
   
-  // Create medicals array (5 elements as required by server)
   JsonArray medicals = doc.createNestedArray("medicals");
   for(int i = 0; i < 5; i++) {
     medicals.add(0);
@@ -194,6 +200,13 @@ void updateDisplay(float heartRate, float spO2, float temperature, float glucose
 
 void loop() {
   pox.update();
+
+  // Check WiFi connection and reconnect if needed
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi connection lost. Reconnecting...");
+    WiFi.reconnect();
+    delay(5000);  // Wait for reconnection
+  }
 
   if (millis() - tsLastReport > REPORTING_PERIOD_MS) {
     float heartRate = pox.getHeartRate();
