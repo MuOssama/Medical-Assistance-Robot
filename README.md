@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Medical-Assistance-Robot
 This is complete medical assistance robot runs on ROS which contains smart medical watch node, sever node carry patient data , motion node, dispensing medicine (syrup and tablets) and call for emergency if patient is in danger  
 # Medical Robot Setup Instructions
@@ -208,4 +207,3 @@ This project is a comprehensive medical assistance robot developed using the Rob
 - **Emergency Response**: The emergency node detects critical health issues and alerts medical personnel promptly.
 
 
->>>>>>> a36247e53591808a1702c34f2d7a13105e79fda4
