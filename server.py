@@ -8,29 +8,29 @@ from threading import Thread, Lock
 from contextlib import contextmanager
 
 class HealthMonitoringServer(object):  # Inherit from object for Python 2
-    def init_db(self):
-        """Initialize database with tables and default data"""
-        with self.get_db_connection() as conn:
-            c = conn.cursor()
-            c.execute('''CREATE TABLE IF NOT EXISTS patients
-                        (id INTEGER PRIMARY KEY,
-                         heart_rate REAL,
-                         spo2 REAL,
-                         temperature REAL,
-                         glucose_level REAL,
-                         medicals TEXT,
-                         medical_schedule INTEGER,
-                         timestamp TEXT,
-                         patient_order INTEGER,
-                         is_dispensing BOOLEAN DEFAULT 0)
-                     ''')
-            
-            default_medicals = json.dumps([0, 0, 0, 0, 0])
-            for patient_id in xrange(1, 4):  # xrange for Python 2
-                c.execute('''INSERT OR IGNORE INTO patients 
-                           (id, heart_rate, medicals, patient_order, is_dispensing)
-                           VALUES (?, ?, ?, ?, ?)''',
-                        (patient_id, patient_id, default_medicals, patient_id, False))
+    def __init__(self):
+        # Database constants
+        self.DB_PATH = 'patients.db'
+        self.VITAL_RANGES = {
+            'heart_rate': (60, 100),
+            'spo2': (95, 100),
+            'temperature': (36.5, 37.5),
+            'glucose_level': (70, 140)
+        }
+        
+        # Initialize lock
+        self.db_lock = Lock()
+        
+        # Flask initialization - moved before setup_routes
+        self.app = Flask(__name__, static_folder='static')
+        CORS(self.app)
+        
+        # Initialize database
+        self.init_db()
+        
+        # Setup routes after Flask app is initialized
+        self.setup_routes()
+
     @contextmanager
     def get_db_connection(self):
         """Context manager for database connections with thread safety"""
@@ -62,7 +62,8 @@ class HealthMonitoringServer(object):  # Inherit from object for Python 2
             default_medicals = json.dumps([0, 0, 0, 0, 0])
             for patient_id in xrange(1, 4):  # xrange for Python 2
                 c.execute('''INSERT OR IGNORE INTO patients 
-                           VALUES (?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?)''',
+                           (id, heart_rate, medicals, patient_order, is_dispensing)
+                           VALUES (?, ?, ?, ?, ?)''',
                         (patient_id, patient_id, default_medicals, patient_id, False))
 
     def check_health_state(self, vitals):
