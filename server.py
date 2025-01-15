@@ -9,6 +9,10 @@ from contextlib import contextmanager
 
 class HealthMonitoringServer(object):  # Inherit from object for Python 2
     def __init__(self):
+        # Flask initialization - must be first
+        self.app = Flask(__name__, static_folder='static')
+        CORS(self.app)
+        
         # Database constants
         self.DB_PATH = 'patients.db'
         self.VITAL_RANGES = {
@@ -21,14 +25,8 @@ class HealthMonitoringServer(object):  # Inherit from object for Python 2
         # Initialize lock
         self.db_lock = Lock()
         
-        # Flask initialization - moved before setup_routes
-        self.app = Flask(__name__, static_folder='static')
-        CORS(self.app)
-        
-        # Initialize database
+        # Initialize database and routes
         self.init_db()
-        
-        # Setup routes after Flask app is initialized
         self.setup_routes()
 
     @contextmanager
@@ -45,8 +43,12 @@ class HealthMonitoringServer(object):  # Inherit from object for Python 2
     def init_db(self):
         """Initialize database with tables and default data"""
         with self.get_db_connection() as conn:
+            # First, drop the existing table if it exists
             c = conn.cursor()
-            c.execute('''CREATE TABLE IF NOT EXISTS patients
+            c.execute('DROP TABLE IF EXISTS patients')
+            
+            # Create the table with the correct schema
+            c.execute('''CREATE TABLE patients
                         (id INTEGER PRIMARY KEY,
                          heart_rate REAL,
                          spo2 REAL,
@@ -56,22 +58,26 @@ class HealthMonitoringServer(object):  # Inherit from object for Python 2
                          medical_schedule INTEGER,
                          timestamp TEXT,
                          patient_order INTEGER,
-                         is_dispensing BOOLEAN DEFAULT 0)
+                         is_dispensing INTEGER DEFAULT 0)
                      ''')
             
+            # Insert default data
             default_medicals = json.dumps([0, 0, 0, 0, 0])
-            for patient_id in xrange(1, 4):  # xrange for Python 2
-                c.execute('''INSERT OR IGNORE INTO patients 
-                           (id, heart_rate, medicals, patient_order, is_dispensing)
-                           VALUES (?, ?, ?, ?, ?)''',
-                        (patient_id, patient_id, default_medicals, patient_id, False))
+            insert_sql = '''INSERT INTO patients 
+                          (id, heart_rate, spo2, temperature, glucose_level, 
+                           medicals, medical_schedule, timestamp, patient_order, is_dispensing)
+                          VALUES (?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?)'''
+            
+            for patient_id in range(1, 4):  # Using range instead of xrange for Python 3 compatibility
+                c.execute(insert_sql, 
+                         (patient_id, patient_id, default_medicals, patient_id, 0))
 
     def check_health_state(self, vitals):
         """Determine patient health state based on vital signs"""
-        if any(vitals[key] is None for key in self.VITAL_RANGES.iterkeys()):  # iterkeys for Python 2
+        if any(vitals[key] is None for key in self.VITAL_RANGES.keys()):  # Using keys() for Python 3 compatibility
             return "unknown"
             
-        for vital, (min_val, max_val) in self.VITAL_RANGES.iteritems():  # iteritems for Python 2
+        for vital, (min_val, max_val) in self.VITAL_RANGES.items():  # Using items() for Python 3 compatibility
             if vitals[vital] < min_val or vitals[vital] > max_val:
                 return "in danger"
         return "ok"
@@ -132,7 +138,7 @@ class HealthMonitoringServer(object):  # Inherit from object for Python 2
                               int(data['medical_schedule']),
                               timestamp,
                               int(data['patient_order']),
-                              bool(data['is_dispensing']),
+                              1 if data['is_dispensing'] else 0,  # Store as INTEGER
                               patient_id))
                 
                 return jsonify({'status': 'success'}), 200
