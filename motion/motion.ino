@@ -3,7 +3,7 @@
 #include <BluetoothSerial.h>
 #include <Preferences.h>
 
-// Config
+// Config storage
 Preferences preferences;
 String ssid;
 String password;
@@ -11,16 +11,16 @@ String serverIP;
 String serverUrl;
 bool isConfigMode = false;
 
-// Pins (using direct port manipulation for speed and size)
+// Pin Definitions
 const uint8_t PINS_MOTOR[] = {25, 26, 27, 32, 33, 14}; // STEP, DIR, EN for L & R
 const uint8_t PINS_IR[] = {36, 39, 34, 35, 15, 4, 16, 17, 18, 19};
 
-// Constants
+// Motion Constants
 const uint16_t STEPS_PER_REV = 200;
 const uint8_t MICROSTEPS = 1;
-uint8_t currentRPM = 5; // Store as integer, divide when needed
+uint8_t currentRPM = 5;
 
-// State machine (use smaller data types)
+// State Machine
 uint8_t state = 0;     // 0:IDLE, 1:FINDING, 2:FOLLOWING, 3:AT_PATIENT, 4:WAITING
 uint8_t command = 0;   // 0:STOP, 1:FORWARD, 2:LINE_FOLLOW
 uint8_t patient = 0;
@@ -28,6 +28,7 @@ const uint8_t TARGET_PATIENT = 1;
 
 BluetoothSerial SerialBT;
 
+// Configuration Functions
 void updateServerUrl() {
     serverUrl = "http://" + serverIP + ":5000/api/patients/";
 }
@@ -72,6 +73,7 @@ bool connectWiFi() {
     return false;
 }
 
+// Serial Configuration Interface
 void printHelp() {
     Serial.println("\n=== Available Commands ===");
     Serial.println("CONFIG     - Enter configuration mode");
@@ -91,23 +93,20 @@ void handleSerialConfig() {
         cmd.trim();
         
         if (cmd.startsWith("SSID:")) {
-            String newSSID = cmd.substring(5);
-            newSSID.trim();
-            ssid = newSSID;
+            ssid = cmd.substring(5);
+            ssid.trim();
             Serial.println("SSID set to: " + ssid);
             Serial.println("Type SAVE to store permanently");
         }
         else if (cmd.startsWith("PASS:")) {
-            String newPassword = cmd.substring(5);
-            newPassword.trim();
-            password = newPassword;
+            password = cmd.substring(5);
+            password.trim();
             Serial.println("Password set");
             Serial.println("Type SAVE to store permanently");
         }
         else if (cmd.startsWith("IP:")) {
-            String newIP = cmd.substring(3);
-            newIP.trim();
-            serverIP = newIP;
+            serverIP = cmd.substring(3);
+            serverIP.trim();
             updateServerUrl();
             Serial.println("Server IP set to: " + serverIP);
             Serial.println("Full server URL: " + serverUrl);
@@ -153,6 +152,12 @@ void handleSerialConfig() {
     }
 }
 
+// Robot Control Functions
+void setMotors(bool enable) {
+    digitalWrite(PINS_MOTOR[2], !enable);
+    digitalWrite(PINS_MOTOR[5], !enable);
+}
+
 bool updateServer(uint8_t id, bool isDispensing) {
     if(WiFi.status() != WL_CONNECTED) return false;
     
@@ -169,13 +174,117 @@ bool updateServer(uint8_t id, bool isDispensing) {
     return (code == 200);
 }
 
-// [Rest of the original functions remain the same: setMotors, checkLine, getLinePos, step, handleCmd, followLine]
+bool checkLine() {
+    uint8_t count = 0;
+    for(uint8_t i = 0; i < 10; i++) {
+        if(digitalRead(PINS_IR[i])) count++;
+    }
+    return count >= 8;
+}
+
+int8_t getLinePos() {
+    uint8_t left = 0, right = 0;
+    
+    for(uint8_t i = 0; i < 5; i++) {
+        if(digitalRead(PINS_IR[i])) left++;
+        if(digitalRead(PINS_IR[i + 5])) right++;
+    }
+    
+    return (right > left) ? 1 : ((left > right) ? -1 : 0);
+}
+
+void step(int8_t left, int8_t right) {
+    static uint32_t stepDelay = (60L * 1000000L) / (STEPS_PER_REV * MICROSTEPS * currentRPM) / 2;
+    
+    digitalWrite(PINS_MOTOR[1], left > 0);
+    digitalWrite(PINS_MOTOR[4], right > 0);
+    
+    if(abs(left) || abs(right)) {
+        digitalWrite(PINS_MOTOR[0], HIGH);
+        digitalWrite(PINS_MOTOR[3], HIGH);
+        delayMicroseconds(stepDelay);
+        digitalWrite(PINS_MOTOR[0], LOW);
+        digitalWrite(PINS_MOTOR[3], LOW);
+        delayMicroseconds(stepDelay);
+    }
+}
+
+void handleCmd() {
+    if(!SerialBT.available()) return;
+    
+    String cmd = SerialBT.readStringUntil('\n');
+    cmd.trim();
+    Serial.println(cmd);
+    
+    if(cmd == F("AUX1") && !state) {
+        state = 1;
+        command = 2;
+        setMotors(true);
+        patient = 0;
+        Serial.println("AUX1");
+    }
+    else if(cmd == F("STOP") || cmd == F("Emergency")) {
+        command = state = 0;
+        setMotors(false);
+        Serial.println("Stop");
+    }
+    else if(cmd.startsWith(F("RPM:"))) {
+        uint8_t rpm = cmd.substring(4).toInt();
+        if(rpm > 0 && rpm <= 10) currentRPM = rpm;
+    }
+    else if(!state) {
+        setMotors(true);
+        if(cmd == F("U")){ step(5, 5); Serial.println("Forward");}
+        else if(cmd == F("r")) {step(-5, -5);Serial.println("Backward");}
+        else if(cmd == F("L")) {step(-3, 3);Serial.println("Left");}
+        else if(cmd == F("R")) {step(3, -3);Serial.println("Right");}
+        else if(cmd == F("B")) {step(0, 0);Serial.println("Stop");}
+    }
+}
+
+void followLine() {
+    if(command != 2) return;
+    
+    switch(state) {
+        case 1: // FINDING
+            if(checkLine()) {
+                state = 2;
+            } else {
+                step(3, -3);
+            }
+            break;
+
+        case 2: // FOLLOWING
+            if(checkLine()) {
+                state = 3;
+                patient++;
+                step(0, 0);
+                updateServer(patient, true);
+            } else {
+                int8_t pos = getLinePos();
+                if(!pos) step(5, 5);
+                else if(pos < 0) step(3, 5);
+                else step(5, 3);
+            }
+            break;
+
+        case 3: // AT_PATIENT
+            if(patient < TARGET_PATIENT) {
+                delay(5000);
+                updateServer(patient, false);
+                state = 2;
+            } else {
+                state = 4;
+                setMotors(false);
+            }
+            break;
+    }
+}
 
 void setup() {
     Serial.begin(115200);
-    delay(1000);  // Give time for Serial Monitor to connect
+    delay(1000);
     
-    // Load saved settings and try to connect
     loadSettings();
     if (!connectWiFi()) {
         isConfigMode = true;
@@ -195,10 +304,10 @@ void setup() {
 }
 
 void loop() {
-    handleSerialConfig();  // Always check for serial commands
+    handleSerialConfig();
     
     if (!isConfigMode) {
-        handleCmd();  // Original Bluetooth commands
+        handleCmd();
         followLine();
     }
     delay(5);
