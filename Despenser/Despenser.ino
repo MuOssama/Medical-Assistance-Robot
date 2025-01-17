@@ -1,263 +1,200 @@
-#include <string.h>
-#include <ros.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <ArduinoJson.h>
 #include <Servo.h>
-#include <std_msgs/Bool.h>
-#include <std_msgs/Int32.h>
-#include <std_msgs/Int32MultiArray.h>
 
-// ROS node handle
-ros::NodeHandle nh;
+// WiFi credentials
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
 
-// Use byte type instead of int for boolean flags and small numbers
-static const byte WATER_PUMP_PIN = 2;
-static const byte SYRUP1_PUMP_PIN = 3;
-static const byte SYRUP2_PUMP_PIN = 4;
-static const byte TABLET1_SERVO_PIN = 5;
-static const byte TABLET2_SERVO_PIN = 6;
-static const byte DANGER_LED_PIN = 13;
-static const byte IR_WATER_PIN = 7;
-static const byte IR_SYRUP_PIN = 8;
-static const byte IR_TABLET_PIN = 9;
-static const byte STATUS_LED_DISPENSING = 10;
-static const byte STATUS_LED_READY = 11;
-static const byte STATUS_LED_ERROR = 12;
+// Server details
+const char* serverHost = "YOUR_SERVER_IP";
+const int serverPort = 5000;
+const int patientId = 1;  // Change this to match the patient ID you want to monitor
 
-// Combine boolean flags into a single byte using bitfields
-struct StatusFlags {
-    unsigned isDispensing : 1;
-    unsigned isPatientPresent : 1;
-    unsigned systemHalted : 1;
-} flags;
+// Pin definitions
+const int WATER_PUMP_PIN = D1;        // Water pump
+const int SYRUP1_PUMP_PIN = D2;       // Syrup medical 1 pump
+const int SYRUP2_PUMP_PIN = D3;       // Syrup medical 2 pump
+const int TABLET_SERVO_PIN = D4;      // Servo for tablets
 
-// Use uint16_t instead of unsigned long where possible
-static const uint16_t PUMP_DURATION = 3000;
-static const uint16_t SERVO_DURATION = 1000;
-static const uint16_t DANGER_LED_DURATION = 1000;
-static const uint16_t ERROR_TIMEOUT = 10000;
-static const uint16_t SENSOR_CHECK_DELAY = 100;
+// Timing constants
+const int PUMP_DURATION = 3000;       // Duration for pump operation (3 seconds)
+const int SERVO_DURATION = 1000;      // Duration for servo movement (1 second)
 
-static const byte SERVO_START = 0;
-static const byte SERVO_END = 180;
-static const byte MAX_DISPENSING_RETRIES = 3;
-
-// Combine related variables into structs to optimize memory alignment
-struct DispenserState {
-    Servo tablet1Servo;
-    Servo tablet2Servo;
-    uint32_t dispensingStartTime;
-    uint32_t lastSensorCheckTime;
-    int8_t currentDispenseStep;
-    int8_t dispensingErrors;
-    int8_t medications[5];
-    int16_t currentPatientId;
-} state;
-
-// Publishers
-std_msgs::Bool dispensing_complete_msg;
-ros::Publisher dispensing_complete_pub("dispensing_complete", &dispensing_complete_msg);
+// Create objects
+Servo tabletServo;
+WiFiClient wifiClient;
+HTTPClient http;
 
 // Function declarations
-void dispenseWater();
-void dispenseSyrup(byte pumpPin);
-void dispenseTablet(Servo& servo);
-void handleDispenseError();
-void resetDispenser();
-inline void setStatusLEDs(bool dispensing, bool ready, bool error);
-bool checkSensor(byte sensorPin);
-
-// Updated callback implementations
-void dispensingStateCallback(const std_msgs::Bool& msg) {
-    if(msg.data && !flags.isDispensing) {
-        flags.isDispensing = true;
-        state.currentDispenseStep = 0;
-        state.dispensingStartTime = millis();
-        state.dispensingErrors = 0;
-        setStatusLEDs(true, false, false);
-    }
-}
-
-void patientCallback(const std_msgs::Int32& msg) {
-    state.currentPatientId = msg.data;
-}
-
-void medicationCallback(const std_msgs::Int32MultiArray& msg) {
-    for(byte i = 0; i < min(msg.data_length, (unsigned int)5); i++) {
-        state.medications[i] = msg.data[i];
-    }
-}
-
-// Subscribers
-ros::Subscriber<std_msgs::Bool> dispensing_state_sub("dispensing_state", &dispensingStateCallback);
-ros::Subscriber<std_msgs::Int32> patient_sub("current_patient", &patientCallback);
-ros::Subscriber<std_msgs::Int32MultiArray> med_sub("medication_array", &medicationCallback);
-
-// Helper functions from original code
-inline void setStatusLEDs(bool dispensing, bool ready, bool error) {
-    digitalWrite(STATUS_LED_DISPENSING, dispensing);
-    digitalWrite(STATUS_LED_READY, ready);
-    digitalWrite(STATUS_LED_ERROR, error);
-}
-
-bool checkSensor(byte sensorPin) {
-    byte readings = 0;
-    for(byte i = 0; i < 5; i++) {
-        readings += digitalRead(sensorPin);
-        delay(10);
-    }
-    return readings >= 3;
-}
-
-void dispenseWater() {
-    digitalWrite(WATER_PUMP_PIN, HIGH);
-    delay(PUMP_DURATION);
-    digitalWrite(WATER_PUMP_PIN, LOW);
-}
-
-void dispenseSyrup(byte pumpPin) {
-    digitalWrite(pumpPin, HIGH);
-    delay(PUMP_DURATION);
-    digitalWrite(pumpPin, LOW);
-}
-
-void dispenseTablet(Servo& servo) {
-    servo.write(SERVO_END);
-    delay(SERVO_DURATION);
-    servo.write(SERVO_START);
-    delay(SERVO_DURATION);
-}
-
-bool dispenseWithRetry(void (*dispenseFunc)(), byte sensorPin) {
-    for(byte retry = 0; retry < MAX_DISPENSING_RETRIES; retry++) {
-        if(!checkSensor(sensorPin)) {
-            state.dispensingErrors++;
-            delay(1000);
-            continue;
-        }
-        
-        dispenseFunc();
-        delay(500);
-        
-        if(checkSensor(sensorPin)) {
-            return true;
-        }
-        
-        state.dispensingErrors++;
-        delay(1000);
-    }
-    return false;
-}
-
-void handleDispenseError() {
-    setStatusLEDs(false, false, true);
-    resetDispenser();
-}
-
-void resetDispenser() {
-    flags.isDispensing = false;
-    state.currentDispenseStep = 0;
-    state.dispensingErrors = 0;
-    
-    digitalWrite(WATER_PUMP_PIN, LOW);
-    digitalWrite(SYRUP1_PUMP_PIN, LOW);
-    digitalWrite(SYRUP2_PUMP_PIN, LOW);
-    
-    state.tablet1Servo.write(SERVO_START);
-    state.tablet2Servo.write(SERVO_START);
-    
-    setStatusLEDs(false, true, false);
-}
-
-void handleDispensing() {
-    if(!flags.isDispensing) return;
-    
-    if(millis() - state.dispensingStartTime > ERROR_TIMEOUT) {
-        handleDispenseError();
-        return;
-    }
-    
-    if(state.dispensingErrors > MAX_DISPENSING_RETRIES * 2) {
-        handleDispenseError();
-        return;
-    }
-    
-    switch(state.currentDispenseStep) {
-        case 0:
-            if(state.medications[0] && dispenseWithRetry(dispenseWater, IR_WATER_PIN)) {
-                state.currentDispenseStep++;
-            }
-            if(!state.medications[0]) state.currentDispenseStep++;
-            break;
-            
-        case 1:
-            if(state.medications[1] && dispenseWithRetry([]() { dispenseSyrup(SYRUP1_PUMP_PIN); }, IR_SYRUP_PIN)) {
-                state.currentDispenseStep++;
-            }
-            if(!state.medications[1]) state.currentDispenseStep++;
-            break;
-            
-        case 2:
-            if(state.medications[2] && dispenseWithRetry([]() { dispenseSyrup(SYRUP2_PUMP_PIN); }, IR_SYRUP_PIN)) {
-                state.currentDispenseStep++;
-            }
-            if(!state.medications[2]) state.currentDispenseStep++;
-            break;
-            
-        case 3:
-            if(state.medications[3] && dispenseWithRetry([]() { dispenseTablet(state.tablet1Servo); }, IR_TABLET_PIN)) {
-                state.currentDispenseStep++;
-            }
-            if(!state.medications[3]) state.currentDispenseStep++;
-            break;
-            
-        case 4:
-            if(state.medications[4] && dispenseWithRetry([]() { dispenseTablet(state.tablet2Servo); }, IR_TABLET_PIN)) {
-                state.currentDispenseStep++;
-            }
-            if(!state.medications[4]) state.currentDispenseStep++;
-            break;
-            
-        default:
-            // Publish completion message
-            dispensing_complete_msg.data = true;
-            dispensing_complete_pub.publish(&dispensing_complete_msg);
-            resetDispenser();
-            break;
-    }
-}
+void dispenseMedication(JsonArray medicals);
+void operatePump(int pin, int duration);
+void operateServo(int angle);
+void updateDispensingState(bool isDispensing);
+bool checkDispensingState();
 
 void setup() {
-    nh.initNode();
-    nh.subscribe(dispensing_state_sub);
-    nh.subscribe(patient_sub);
-    nh.subscribe(med_sub);
-    nh.advertise(dispensing_complete_pub);
-    
-    pinMode(WATER_PUMP_PIN, OUTPUT);
-    pinMode(SYRUP1_PUMP_PIN, OUTPUT);
-    pinMode(SYRUP2_PUMP_PIN, OUTPUT);
-    pinMode(DANGER_LED_PIN, OUTPUT);
-    pinMode(STATUS_LED_DISPENSING, OUTPUT);
-    pinMode(STATUS_LED_READY, OUTPUT);
-    pinMode(STATUS_LED_ERROR, OUTPUT);
-    pinMode(IR_WATER_PIN, INPUT);
-    pinMode(IR_SYRUP_PIN, INPUT);
-    pinMode(IR_TABLET_PIN, INPUT);
-    
-    state.tablet1Servo.attach(TABLET1_SERVO_PIN);
-    state.tablet2Servo.attach(TABLET2_SERVO_PIN);
-    state.tablet1Servo.write(SERVO_START);
-    state.tablet2Servo.write(SERVO_START);
-    
-    setStatusLEDs(false, true, false);
+  Serial.begin(115200);
+  
+  // Initialize pins
+  pinMode(WATER_PUMP_PIN, OUTPUT);
+  pinMode(SYRUP1_PUMP_PIN, OUTPUT);
+  pinMode(SYRUP2_PUMP_PIN, OUTPUT);
+  
+  // Initialize servo
+  tabletServo.attach(TABLET_SERVO_PIN);
+  tabletServo.write(0);  // Initial position
+  
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected");
 }
 
 void loop() {
-    nh.spinOnce();
+  if (WiFi.status() == WL_CONNECTED) {
+    bool isDispensing = checkDispensingState();
     
-    if(millis() - state.lastSensorCheckTime >= SENSOR_CHECK_DELAY) {
-        handleDispensing();
-        state.lastSensorCheckTime = millis();
+    if (isDispensing) {
+      // Get medications array
+      String url = String("http://") + serverHost + ":" + serverPort + "/api/patients/" + patientId;
+      
+      http.begin(wifiClient, url);
+      int httpCode = http.GET();
+      
+      if (httpCode == HTTP_CODE_OK) {
+        String payload = http.getString();
+        
+        // Parse JSON response
+        DynamicJsonDocument doc(1024);
+        DeserializationError error = deserializeJson(doc, payload);
+        
+        if (!error) {
+          // Get medications array
+          JsonArray medicals = doc["medicals"];
+          
+          // Dispense medications
+          dispenseMedication(medicals);
+          
+          // Update dispensing state to false (ready)
+          updateDispensingState(false);
+        } else {
+          Serial.print("JSON parsing failed: ");
+          Serial.println(error.c_str());
+        }
+      } else {
+        Serial.print("HTTP GET failed, error: ");
+        Serial.println(http.errorToString(httpCode).c_str());
+      }
+      
+      http.end();
     }
+  }
+  
+  delay(1000);  // Check every second
+}
+
+void dispenseMedication(JsonArray medicals) {
+  // Water pump
+  if (medicals[0] == 1) {
+    Serial.println("Dispensing water");
+    operatePump(WATER_PUMP_PIN, PUMP_DURATION);
+  }
+  
+  // Syrup medical 1
+  if (medicals[1] == 1) {
+    Serial.println("Dispensing syrup 1");
+    operatePump(SYRUP1_PUMP_PIN, PUMP_DURATION);
+  }
+  
+  // Syrup medical 2
+  if (medicals[2] == 1) {
+    Serial.println("Dispensing syrup 2");
+    operatePump(SYRUP2_PUMP_PIN, PUMP_DURATION);
+  }
+  
+  // Tablet medical 1
+  if (medicals[3] == 1) {
+    Serial.println("Dispensing tablet 1");
+    operateServo(90);  // Move to 90 degrees to dispense tablet 1
+    delay(SERVO_DURATION);
+    operateServo(0);   // Return to initial position
+  }
+  
+  // Tablet medical 2
+  if (medicals[4] == 1) {
+    Serial.println("Dispensing tablet 2");
+    operateServo(0);   // Move to 0 degrees to dispense tablet 2
+    delay(SERVO_DURATION);
+    operateServo(0);   // Return to initial position
+  }
+}
+
+void operatePump(int pin, int duration) {
+  digitalWrite(pin, HIGH);
+  delay(duration);
+  digitalWrite(pin, LOW);
+  delay(500);  // Small delay between operations
+}
+
+void operateServo(int angle) {
+  tabletServo.write(angle);
+  delay(500);  // Give servo time to reach position
+}
+
+bool checkDispensingState() {
+  String url = String("http://") + serverHost + ":" + serverPort + "/api/patients/" + patientId;
+  
+  http.begin(wifiClient, url);
+  int httpCode = http.GET();
+  
+  bool isDispensing = false;
+  
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
     
-    delay(10);
+    DynamicJsonDocument doc(1024);
+    DeserializationError error = deserializeJson(doc, payload);
+    
+    if (!error) {
+      isDispensing = doc["is_dispensing"];
+    } else {
+      Serial.print("JSON parsing failed: ");
+      Serial.println(error.c_str());
+    }
+  } else {
+    Serial.print("HTTP GET failed, error: ");
+    Serial.println(http.errorToString(httpCode).c_str());
+  }
+  
+  http.end();
+  return isDispensing;
+}
+
+void updateDispensingState(bool isDispensing) {
+  String url = String("http://") + serverHost + ":" + serverPort + "/api/patients/" + patientId;
+  
+  // Create JSON payload
+  DynamicJsonDocument doc(1024);
+  doc["is_dispensing"] = isDispensing;
+  
+  String jsonString;
+  serializeJson(doc, jsonString);
+  
+  http.begin(wifiClient, url);
+  http.addHeader("Content-Type", "application/json");
+  int httpCode = http.POST(jsonString);
+  
+  if (httpCode == HTTP_CODE_OK) {
+    Serial.println("Dispensing state updated successfully");
+  } else {
+    Serial.print("Failed to update dispensing state, error: ");
+    Serial.println(http.errorToString(httpCode).c_str());
+  }
+  
+  http.end();
 }
