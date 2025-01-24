@@ -18,9 +18,9 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define BUZZER_PIN D8
 
 // Network configuration
-const char* ssid = "Voda";
-const char* password = "JoMahgoub74";
-const char* serverUrl = "http://192.168.1.7:5000/api/patients/1";
+const char* ssid = "WE718E5F";
+const char* password = "aa029b61";
+const char* serverUrl = "http://192.168.1.3:5000/api/patients/1";
 
 // Create WiFiClient object
 WiFiClient wifiClient;
@@ -49,7 +49,7 @@ float lastValidTemp = 0;
 float lastValidGlucose = 0;
 
 void setup() {
-  Serial.begin(115200);  // Updated to faster baud rate
+  Serial.begin(9600);  // Updated to faster baud rate
   pinMode(BUZZER_PIN, OUTPUT);
   
   // Initialize WiFi
@@ -174,8 +174,7 @@ void updateDisplay(float heartRate, float spO2, float temperature, float glucose
   display.setCursor(0, 0);
   
   if (heartRate > 0 && spO2 > 0) {
-    display.println("Patient Vitals:");
-    display.println("--------------");
+
     display.printf("HR  : %.1f bpm\n", heartRate);
     display.printf("SpO2: %.1f%%\n", spO2);
     display.printf("Temp: %.1fC\n", temperature);
@@ -201,20 +200,13 @@ void updateDisplay(float heartRate, float spO2, float temperature, float glucose
 void loop() {
   pox.update();
 
-  // Check WiFi connection and reconnect if needed
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi connection lost. Reconnecting...");
-    WiFi.reconnect();
-    delay(5000);  // Wait for reconnection
-  }
-
   if (millis() - tsLastReport > REPORTING_PERIOD_MS) {
     float heartRate = pox.getHeartRate();
     float spO2 = pox.getSpO2();
     float temperature = calculateTemperature();
     
     // Validate and store readings
-    if (heartRate > 20 && heartRate < 200 && spO2 > 50 && spO2 < 100) {
+    if (heartRate > 0 && heartRate < 200 && spO2 >0 && spO2 < 110) {
       lastValidHeartRate = heartRate;
       lastValidSpO2 = spO2;
       lastValidTemp = temperature;
@@ -244,7 +236,10 @@ void loop() {
     } else {
       updateDisplay(0, 0, 0, 0, false);  // Show "Place finger" message
     }
-    
+      Serial.println(pox.getHeartRate());
+Serial.println(pox.getSpO2());
+
     tsLastReport = millis();
   }
+
 }

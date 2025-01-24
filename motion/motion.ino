@@ -2,6 +2,15 @@
 #include <HTTPClient.h>
 #include <BluetoothSerial.h>
 #include <Preferences.h>
+#include <Stepper.h>
+
+
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define max(a, b) ((a) > (b) ? (a) : (b)) // Returns the larger of a and b
+
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+#error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
+#endif
 
 // Config storage
 Preferences preferences;
@@ -12,23 +21,34 @@ String serverUrl;
 bool isConfigMode = false;
 
 // Pin Definitions
-const uint8_t PINS_MOTOR[] = {25, 26, 27, 32, 33, 14}; // STEP, DIR, EN for L & R
-const uint8_t PINS_IR[] = {36, 39, 34, 35, 15, 4, 16, 17, 18, 19};
+const uint16_t LEFT_MOTOR[] = {25, 26, 27};   // STEP, DIR, EN for left TB6600
+const uint16_t RIGHT_MOTOR[] = {32, 33, 35};  // STEP, DIR, EN for right TB6600
+const uint16_t PINS_IR[] = {18, 19, 21, 22, 23};  // IR sensors from left to right
 
-// Motion Constants
-const uint16_t STEPS_PER_REV = 200;
-const uint8_t MICROSTEPS = 1;
-uint8_t currentRPM = 5;
+// Motion Control Constants
+const uint16_t STEPS_PER_REVOLUTION = 200;
+const uint16_t MICROSTEPS = 1;
+const uint16_t MAX_SPEED = 1500;
+const uint16_t TURN_SPEED = 1500;
+const unsigned long MOVE_DURATION = 3000; // ms
+// Instead of just step/dir pins, add steps per revolution
+Stepper leftStepper(STEPS_PER_REVOLUTION, LEFT_MOTOR[0], LEFT_MOTOR[1]); // Add enable pin
+Stepper rightStepper(STEPS_PER_REVOLUTION, RIGHT_MOTOR[0], RIGHT_MOTOR[1]);
+// Movement State
+struct MovementState {
+    unsigned long moveStartTime;
+    bool isMoving;
+    int16_t leftSpeed;
+    int16_t rightSpeed;
+    uint16_t state;     // 0:IDLE, 1:FINDING, 2:FOLLOWING, 3:AT_PATIENT, 4:WAITING
+    uint16_t command;   // 0:STOP, 1:MANUAL, 2:LINE_FOLLOW
+    uint16_t patient;
+} movement = {0, false, 0, 0, 0, 0, 0};
 
-// State Machine
-uint8_t state = 0;     // 0:IDLE, 1:FINDING, 2:FOLLOWING, 3:AT_PATIENT, 4:WAITING
-uint8_t command = 0;   // 0:STOP, 1:FORWARD, 2:LINE_FOLLOW
-uint8_t patient = 0;
-const uint8_t TARGET_PATIENT = 1;
-
+const uint16_t TARGET_PATIENT = 1;
 BluetoothSerial SerialBT;
 
-// Configuration Functions
+// WiFi and Server Functions
 void updateServerUrl() {
     serverUrl = "http://" + serverIP + ":5000/api/patients/";
 }
@@ -38,10 +58,18 @@ void loadSettings() {
     ssid = preferences.getString("ssid", "");
     password = preferences.getString("password", "");
     serverIP = preferences.getString("ip", "192.168.1.100");
+    
+    Serial.println("\nLoaded settings:");
+    Serial.print("SSID length: ");
+    Serial.println(ssid.length());
+    Serial.print("Password length: ");
+    Serial.println(password.length());
+    Serial.print("Server IP: ");
+    Serial.println(serverIP);
+    
     updateServerUrl();
     preferences.end();
 }
-
 void saveSettings() {
     preferences.begin("settings", false);
     preferences.putString("ssid", ssid);
@@ -51,114 +79,110 @@ void saveSettings() {
 }
 
 bool connectWiFi() {
-    if (ssid.length() == 0) return false;
+    if (ssid.length() == 0) {
+        Serial.println("No SSID configured");
+        return false;
+    }
     
-    Serial.print("Connecting to WiFi");
+    Serial.println("Attempting to connect to WiFi");
+    Serial.print("SSID: ");
+    Serial.println(ssid);
+    Serial.print("Password length: ");
+    Serial.println(password.length());
+    
     WiFi.begin(ssid.c_str(), password.c_str());
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    uint16_t attempts = 0;
+    const uint16_t MAX_ATTEMPTS = 40; // Increased from 20 to 40 attempts
+    
+    while (WiFi.status() != WL_CONNECTED && attempts < MAX_ATTEMPTS) {
         delay(500);
         Serial.print(".");
         attempts++;
+        
+        // Print WiFi status for debugging
+        switch(WiFi.status()) {
+            case WL_NO_SHIELD: Serial.println("No WiFi shield"); break;
+            case WL_IDLE_STATUS: Serial.println("Idle"); break;
+            case WL_NO_SSID_AVAIL: Serial.println("No SSID available"); break;
+            case WL_SCAN_COMPLETED: Serial.println("Scan completed"); break;
+            case WL_CONNECT_FAILED: Serial.println("Connection failed"); break;
+            case WL_CONNECTION_LOST: Serial.println("Connection lost"); break;
+            case WL_DISCONNECTED: Serial.println("Disconnected"); break;
+        }
     }
-    Serial.println();
     
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("Connected to WiFi!");
-        Serial.print("IP Address: ");
+        Serial.println("\nConnected successfully!");
+        Serial.print("IP address: ");
         Serial.println(WiFi.localIP());
         return true;
-    }
-    Serial.println("Connection failed!");
-    return false;
-}
-
-// Serial Configuration Interface
-void printHelp() {
-    Serial.println("\n=== Available Commands ===");
-    Serial.println("CONFIG     - Enter configuration mode");
-    Serial.println("SHOW      - Show current settings");
-    Serial.println("CLEAR     - Clear all settings");
-    Serial.println("SSID:xxx  - Set WiFi name");
-    Serial.println("PASS:xxx  - Set WiFi password");
-    Serial.println("IP:xxx    - Set server IP (e.g., IP:192.168.1.100)");
-    Serial.println("SAVE      - Save all settings");
-    Serial.println("HELP      - Show this help");
-    Serial.println("=====================");
-}
-
-void handleSerialConfig() {
-    if (Serial.available()) {
-        String cmd = Serial.readStringUntil('\n');
-        cmd.trim();
-        
-        if (cmd.startsWith("SSID:")) {
-            ssid = cmd.substring(5);
-            ssid.trim();
-            Serial.println("SSID set to: " + ssid);
-            Serial.println("Type SAVE to store permanently");
-        }
-        else if (cmd.startsWith("PASS:")) {
-            password = cmd.substring(5);
-            password.trim();
-            Serial.println("Password set");
-            Serial.println("Type SAVE to store permanently");
-        }
-        else if (cmd.startsWith("IP:")) {
-            serverIP = cmd.substring(3);
-            serverIP.trim();
-            updateServerUrl();
-            Serial.println("Server IP set to: " + serverIP);
-            Serial.println("Full server URL: " + serverUrl);
-            Serial.println("Type SAVE to store permanently");
-        }
-        else if (cmd == "SAVE") {
-            saveSettings();
-            Serial.println("Settings saved!");
-            if (connectWiFi()) {
-                isConfigMode = false;
-            }
-        }
-        else if (cmd == "CONFIG") {
-            isConfigMode = true;
-            Serial.println("\n=== Configuration Mode ===");
-            printHelp();
-        }
-        else if (cmd == "SHOW") {
-            Serial.println("\nCurrent Settings:");
-            Serial.println("SSID: " + ssid);
-            Serial.println("Password: " + String(password.length()) + " characters");
-            Serial.println("Server IP: " + serverIP);
-            Serial.println("Full Server URL: " + serverUrl);
-            Serial.println("WiFi Status: " + String(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected"));
-            if (WiFi.status() == WL_CONNECTED) {
-                Serial.println("IP: " + WiFi.localIP().toString());
-            }
-        }
-        else if (cmd == "CLEAR") {
-            preferences.begin("settings", false);
-            preferences.clear();
-            preferences.end();
-            ssid = "";
-            password = "";
-            serverIP = "192.168.1.100";
-            updateServerUrl();
-            Serial.println("All settings cleared");
-            isConfigMode = true;
-        }
-        else if (cmd == "HELP") {
-            printHelp();
-        }
+    } else {
+        Serial.println("\nFailed to connect! Final status: ");
+        Serial.println(WiFi.status());
+        return false;
     }
 }
 
-// Robot Control Functions
 void setMotors(bool enable) {
-    digitalWrite(PINS_MOTOR[2], !enable);
-    digitalWrite(PINS_MOTOR[5], !enable);
+    digitalWrite(LEFT_MOTOR[2], !enable);   // Enable pin is typically active low
+    digitalWrite(RIGHT_MOTOR[2], !enable);
+}
+void stepMotor(const uint16_t* motor_pins, bool direction, uint16_t steps) {
+    digitalWrite(motor_pins[1], direction);  // Set direction
+    
+    // Add small delay after direction change
+    delayMicroseconds(100);
+    
+    for(uint16_t i = 0; i < steps; i++) {
+        digitalWrite(motor_pins[0], HIGH);
+        delayMicroseconds(1);  // Increased pulse width
+        digitalWrite(motor_pins[0], LOW);
+        delayMicroseconds(1);  // Increased delay between pulses
+    }
 }
 
-bool updateServer(uint8_t id, bool isDispensing) {
+void moveRobot(int16_t leftSpeed, int16_t rightSpeed) {
+    // Convert speed to RPM 
+    int leftRPM = map(abs(leftSpeed), 0, MAX_SPEED, 0, 1500);
+    int rightRPM = map(abs(rightSpeed), 0, MAX_SPEED, 0, 1500);
+    
+    leftStepper.setSpeed(leftRPM);
+    rightStepper.setSpeed(rightRPM);
+    
+    // Use step() with number of steps
+    leftStepper.step(leftSpeed > 0 ? 100 : -100);
+    rightStepper.step(rightSpeed > 0 ? 100 : -100);
+}
+
+// Line Following Functions
+bool checkLine() {
+    uint16_t count = 0;
+    for(uint16_t i = 0; i < 5; i++) {
+        count += digitalRead(PINS_IR[i]);
+    }
+    return count >= 4;
+}
+
+int16_t getLinePos() {
+    int16_t position = 0;
+    uint16_t sensors = 0;
+    
+    for(uint16_t i = 0; i < 5; i++) {
+        if(digitalRead(PINS_IR[i])) {
+            position += (i - 2) * 100;
+            sensors++;
+        }
+    }
+    
+    if(sensors == 0) return 0;
+    position /= sensors;
+    
+    if(abs(position) < 50) return 0;
+    return position < 0 ? -1 : 1;
+}
+
+// Server Communication
+bool updateServer(uint16_t id, bool isDispensing) {
     if(WiFi.status() != WL_CONNECTED) return false;
     
     HTTPClient http;
@@ -166,149 +190,312 @@ bool updateServer(uint8_t id, bool isDispensing) {
     http.begin(fullUrl);
     http.addHeader("Content-Type", "application/json");
     
-    char payload[32];
-    snprintf(payload, sizeof(payload), "{\"is_dispensing\":%s}", isDispensing ? "true" : "false");
-    
+    String payload = "{\"is_dispensing\":" + String(isDispensing ? "true" : "false") + "}";
     int code = http.POST(payload);
     http.end();
-    return (code == 200);
+    
+    return code == 200;
 }
 
-bool checkLine() {
-    uint8_t count = 0;
-    for(uint8_t i = 0; i < 10; i++) {
-        if(digitalRead(PINS_IR[i])) count++;
-    }
-    return count >= 8;
+// Movement Control
+void startMovement(int16_t leftSpeed, int16_t rightSpeed) {
+    movement.moveStartTime = millis();
+    movement.isMoving = true;
+    movement.leftSpeed = leftSpeed;
+    movement.rightSpeed = rightSpeed;
+    
+    // Set stepper speeds
+    leftStepper.setSpeed(abs(leftSpeed));
+    rightStepper.setSpeed(abs(rightSpeed));
+    
+    // Enable motors by setting initial movement
+    leftStepper.step(leftSpeed > 0 ? 1 : -1);
+    rightStepper.step(rightSpeed > 0 ? 1 : -1);
+}
+void stopMovement() {
+    movement.isMoving = false;
+    movement.leftSpeed = 0;
+    movement.rightSpeed = 0;
+    setMotors(false);
 }
 
-int8_t getLinePos() {
-    uint8_t left = 0, right = 0;
-    
-    for(uint8_t i = 0; i < 5; i++) {
-        if(digitalRead(PINS_IR[i])) left++;
-        if(digitalRead(PINS_IR[i + 5])) right++;
-    }
-    
-    return (right > left) ? 1 : ((left > right) ? -1 : 0);
-}
-
-void step(int8_t left, int8_t right) {
-    static uint32_t stepDelay = (60L * 1000000L) / (STEPS_PER_REV * MICROSTEPS * currentRPM) / 2;
-    
-    digitalWrite(PINS_MOTOR[1], left > 0);
-    digitalWrite(PINS_MOTOR[4], right > 0);
-    
-    if(abs(left) || abs(right)) {
-        digitalWrite(PINS_MOTOR[0], HIGH);
-        digitalWrite(PINS_MOTOR[3], HIGH);
-        delayMicroseconds(stepDelay);
-        digitalWrite(PINS_MOTOR[0], LOW);
-        digitalWrite(PINS_MOTOR[3], LOW);
-        delayMicroseconds(stepDelay);
+void updateMovement() {
+    if (movement.isMoving) {
+        if (millis() - movement.moveStartTime >= MOVE_DURATION) {
+            stopMovement();
+        } else {
+            moveRobot(movement.leftSpeed, movement.rightSpeed);
+        }
     }
 }
 
-void handleCmd() {
-    if(!SerialBT.available()) return;
-    
-    String cmd = SerialBT.readStringUntil('\n');
-    cmd.trim();
-    Serial.println(cmd);
-    
-    if(cmd == F("AUX1") && !state) {
-        state = 1;
-        command = 2;
+// Command Handling
+void handleCommand(String cmd) {
+    if(cmd == "X" && !movement.state) {
+        movement.state = 1;
+        movement.command = 2;
         setMotors(true);
-        patient = 0;
-        Serial.println("AUX1");
+        movement.patient = 0;
+        Serial.println("Follow Line");
     }
-    else if(cmd == F("STOP") || cmd == F("Emergency")) {
-        command = state = 0;
-        setMotors(false);
-        Serial.println("Stop");
+    else if(cmd == "STOP" || cmd == "Emergency") {
+        movement.command = movement.state = 0;
+        stopMovement();
     }
-    else if(cmd.startsWith(F("RPM:"))) {
-        uint8_t rpm = cmd.substring(4).toInt();
-        if(rpm > 0 && rpm <= 10) currentRPM = rpm;
-    }
-    else if(!state) {
-        setMotors(true);
-        if(cmd == F("U")){ step(5, 5); Serial.println("Forward");}
-        else if(cmd == F("r")) {step(-5, -5);Serial.println("Backward");}
-        else if(cmd == F("L")) {step(-3, 3);Serial.println("Left");}
-        else if(cmd == F("R")) {step(3, -3);Serial.println("Right");}
-        else if(cmd == F("B")) {step(0, 0);Serial.println("Stop");}
+    else if(!movement.state && !movement.isMoving) {
+        if(cmd == "U") {
+            startMovement(MAX_SPEED, MAX_SPEED);
+            Serial.println("forward");
+        }
+        else if(cmd == "r") {
+            startMovement(-MAX_SPEED, -MAX_SPEED);
+            Serial.println("backward");
+        }
+        else if(cmd == "L") {
+            startMovement(TURN_SPEED,-TURN_SPEED);  // Left motor backward, Right motor forward
+            Serial.println("left");
+        }
+        else if(cmd == "R") {
+            startMovement(-TURN_SPEED, TURN_SPEED);  // Left motor forward, Right motor backward
+            Serial.println("right");
+        }
     }
 }
 
 void followLine() {
-    if(command != 2) return;
+if(movement.command != 2 || movement.isMoving) return;
     
-    switch(state) {
+    static float lastError = 0;
+    static float integral = 0;
+    const float KP = 1.5, KI = 0.01, KD = 0.5;
+    
+    switch(movement.state) {
         case 1: // FINDING
             if(checkLine()) {
-                state = 2;
+                movement.state = 2;
             } else {
-                step(3, -3);
+                static int searchDirection = 1;
+                static unsigned long searchStartTime = millis();
+                
+                if (millis() - searchStartTime > 2000) {
+                    searchDirection *= -1;
+                    searchStartTime = millis();
+                }
+                
+                // Convert to RPM and use step()
+                int searchRPM = 1500;  // Slower search speed
+                leftStepper.setSpeed(searchRPM);
+                rightStepper.setSpeed(searchRPM);
+                leftStepper.step(5 * searchDirection);
+                rightStepper.step(-5 * searchDirection);
             }
             break;
 
         case 2: // FOLLOWING
             if(checkLine()) {
-                state = 3;
-                patient++;
-                step(0, 0);
-                updateServer(patient, true);
+                movement.state = 3;
+                movement.patient++;
+                leftStepper.step(0);
+                rightStepper.step(0);
+                updateServer(movement.patient, true);
             } else {
-                int8_t pos = getLinePos();
-                if(!pos) step(5, 5);
-                else if(pos < 0) step(3, 5);
-                else step(5, 3);
+                float error = getLinePos();
+                integral = constrain(integral + error, -50, 50);
+                float derivative = error - lastError;
+                
+                float correction = KP * error + KI * integral + KD * derivative;
+                lastError = error;
+                
+                int baseRPM = 1500;  // Base RPM 
+                int leftRPM = baseRPM - correction;
+                int rightRPM = baseRPM + correction;
+                
+                // Constrain RPM
+                leftRPM = constrain(leftRPM, 0, 120);
+                rightRPM = constrain(rightRPM, 0, 120);
+                
+                leftStepper.setSpeed(leftRPM);
+                rightStepper.setSpeed(rightRPM);
+                leftStepper.step(error > 0 ? 50 : -50);
+                rightStepper.step(error > 0 ? -50 : 50);
             }
             break;
-
         case 3: // AT_PATIENT
-            if(patient < TARGET_PATIENT) {
+            if(movement.patient < TARGET_PATIENT) {
                 delay(5000);
-                updateServer(patient, false);
-                state = 2;
+                updateServer(movement.patient, false);
+                movement.state = 2;
             } else {
-                state = 4;
+                movement.state = 4;
                 setMotors(false);
             }
             break;
     }
 }
 
+void handleConfig() {
+    Serial.println("\n=== Configuration Mode ===");
+    Serial.println("Current settings:");
+    Serial.println("SSID: " + ssid);
+    Serial.println("Password: " + password);  // Added line to show password
+    Serial.println("Server IP: " + serverIP); // Added line to show current server IP
+    Serial.println("\n1. Set WiFi credentials");
+    Serial.println("2. Set server IP");
+    Serial.println("3. Save and exit");
+    Serial.println("Please enter your choice (1-3):");
+    
+    while (true) {
+        if (Serial.available()) {
+            char choice = Serial.read();
+            
+            switch (choice) {
+        case '1':
+            Serial.println("\nWiFi Setup:");
+            Serial.println("Enter SSID, wait for password prompt");
+            
+            // Clear any existing serial data
+            while(Serial.available()) {
+                Serial.read();
+            }
+            
+            // Wait for SSID input
+            while(!Serial.available()) {
+                delay(100);
+            }
+            delay(100); // Give time for full input
+            ssid = Serial.readStringUntil('\n');
+            ssid.trim();
+            
+            Serial.println("SSID received: " + ssid);
+            Serial.println("Now enter password:");
+            
+            // Clear buffer again
+            while(Serial.available()) {
+                Serial.read();
+            }
+            
+            // Wait for password input
+            while(!Serial.available()) {
+                delay(100);
+            }
+            delay(100); // Give time for full input
+            password = Serial.readStringUntil('\n');
+            password.trim();
+            
+            Serial.println("Password received.");
+            Serial.println("WiFi credentials updated!");
+            delay(1000);
+            handleConfig();
+            break;
+                    
+            case '2':
+                Serial.println("\nServer Setup:");
+                Serial.println("Enter server IP (e.g., 192.168.1.100):");
+                
+                // Clear any existing serial data
+                while(Serial.available()) {
+                    Serial.read();
+                }
+                
+                // Wait for IP input
+                while(!Serial.available()) {
+                    delay(100);
+                }
+                delay(100); // Give time for full input
+                serverIP = Serial.readStringUntil('\n');
+                serverIP.trim();
+                
+                Serial.println("Server IP received: " + serverIP);
+                updateServerUrl();
+                
+                Serial.println("Server IP updated!");
+                delay(1000);
+                handleConfig();
+                break;
+                    
+                case '3':
+                    saveSettings();
+                    Serial.println("\nSettings saved!");
+                    if (connectWiFi()) {
+                        Serial.println("Successfully connected to WiFi!");
+                        Serial.print("IP address: ");
+                        Serial.println(WiFi.localIP());
+                        isConfigMode = false;
+                        return;
+                    } else {
+                        Serial.println("Failed to connect to WiFi. Please check credentials.");
+                        handleConfig();
+                    }
+                    break;
+                    
+                default:
+                    Serial.println("Invalid choice. Please try again.");
+                    handleConfig();
+                    break;
+            }
+        }
+        delay(100);
+    }
+}
+
 void setup() {
     Serial.begin(115200);
-    delay(1000);
     
-    loadSettings();
-    if (!connectWiFi()) {
-        isConfigMode = true;
-        Serial.println("\nWiFi not configured or connection failed");
-        printHelp();
+    // Initialize pins
+    for(uint16_t i = 0; i < 3; i++) {
+        pinMode(LEFT_MOTOR[i], OUTPUT);
+        pinMode(RIGHT_MOTOR[i], OUTPUT);
     }
-    
-    for(uint8_t i = 0; i < 6; i++) {
-        pinMode(PINS_MOTOR[i], OUTPUT);
-    }
-    for(uint8_t i = 0; i < 10; i++) {
+    for(uint16_t i = 0; i < 5; i++) {
         pinMode(PINS_IR[i], INPUT);
     }
     
-    SerialBT.begin("MedRobot");
     setMotors(false);
+    
+    // Initialize WiFi
+    loadSettings();
+    
+    // Check for configuration request
+    Serial.println("Press 'c' within 5 seconds to enter configuration mode...");
+    unsigned long startTime = millis();
+    while (millis() - startTime < 5000) {
+        if (Serial.available() && Serial.read() == 'c') {
+            isConfigMode = true;
+            break;
+        }
+        delay(100);
+    }
+    
+    if (isConfigMode) {
+        handleConfig();
+    } else if (!connectWiFi()) {
+        Serial.println("Failed to connect to WiFi. Starting in config mode...");
+        isConfigMode = true;
+        handleConfig();
+    }
+    
+    // Initialize Bluetooth
+    SerialBT.begin("MedRobot");
+    Serial.println("The device started, now you can pair it with bluetooth!");
 }
 
 void loop() {
-    handleSerialConfig();
-    
-    if (!isConfigMode) {
-        handleCmd();
-        followLine();
+    if (isConfigMode) {
+        if (Serial.available() && Serial.read() == 'c') {
+            handleConfig();
+        }
+    } else {
+        if (SerialBT.available()) {
+            String cmd = SerialBT.readStringUntil('\n');
+            cmd.trim();
+            handleCommand(cmd);
+        }
+        
+        updateMovement();
+        if (!movement.isMoving) {
+            followLine();
+        }
     }
+    
     delay(5);
 }
